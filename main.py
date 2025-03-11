@@ -25,10 +25,10 @@ def download_image(element):
         print("Erro ao baixar ou converter a imagem")
         return None
 
-def scrap_message(_driver):
-    messages = _driver.find_elements(By.XPATH, ".//div[contains(@class, 'StreamMessage_container__')]")
+def scrap_message(driver, symbol, total_messages):
+    messages = driver.find_elements(By.XPATH, ".//div[contains(@class, 'StreamMessage_container__')]")
 
-    for message in messages:
+    for message in messages[total_messages:]:
         try:
             href_value = message.find_element(By.XPATH, ".//a[contains(@href, '/message/')]").get_attribute("href")
             match = re.search(r"/message/(\d+)", href_value)
@@ -46,13 +46,15 @@ def scrap_message(_driver):
             text = message.find_element(By.XPATH, ".//div[starts-with(@class, 'RichTextMessage_body__')]").text.strip()
             image_base64 = download_image(message)
 
-            insert_query = 'insert into tweets (pub_id, pub_author, pub_text, pub_img, pub_date) values (%s, %s, %s, %s, %s)'
-            insert_data = (message_id, author, text, image_base64, date)
+            insert_query = 'insert into tweets (pub_id, pub_author, pub_text, pub_img, pub_date, symbol) values (%s, %s, %s, %s, %s, %s)'
+            insert_data = (message_id, author, text, image_base64, date, symbol)
 
             execute_query(insert_query, insert_data)
 
         except Exception as e:
             print("Erro ao extrair mensagem:", e)
+
+    return len(messages)
 
 
 if __name__ == "__main__":
@@ -76,9 +78,10 @@ if __name__ == "__main__":
 
     SCROLL_PAUSE_TIME = 2
     last_height = driver.execute_script("return document.body.scrollHeight")
+    total_messages = 0
 
     while True:
-        scrap_message(driver)
+        total_messages = scrap_message(driver, symbol, total_messages)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(SCROLL_PAUSE_TIME)
 
