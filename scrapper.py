@@ -51,8 +51,8 @@ def scrap_message(page, symbol, total_messages):
             date = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ") if date_str else None
 
             if result is not None and len(result) > 0:
-                update_query = "UPDATE tweets SET pub_date = %s WHERE pub_id = %s"
-                execute_query(update_query, (date, message_id))
+                # update_query = "UPDATE tweets SET pub_date = %s WHERE pub_id = %s"
+                # execute_query(update_query, (date, message_id))
                 continue
 
             author_element = message.query_selector("xpath=.//span[@aria-label='Username']")
@@ -98,7 +98,7 @@ def main():
         page.goto(f'https://stocktwits.com/symbol/{symbol}')
         time.sleep(3)
 
-        SCROLL_PAUSE_TIME = 2
+        SCROLL_PAUSE_TIME = 4
         last_height = page.evaluate("document.body.scrollHeight")
         total_messages = 0
 
