@@ -13,6 +13,10 @@ from transformers import pipeline
 
 load_dotenv()
 
+def save_log(log):
+    execute_query("INSERT INTO execution_logs (log) VALUES (%s)", (log,))
+    print(log)
+
 def download_image(element):
     try:
         img = element.query_selector("xpath=.//img[contains(@class, 'StreamMessageEmbed')]")
@@ -24,6 +28,7 @@ def download_image(element):
         image_base64 = base64.b64encode(response.content).decode('utf-8')
         return image_base64
     except Exception as e:
+        save_log(f"Erro ao baixar imagem: {e}")
         return None
 
 def scrap_message(page, symbol, total_messages, pipe=None):
@@ -76,48 +81,47 @@ def scrap_message(page, symbol, total_messages, pipe=None):
 
             execute_query(insert_query, insert_data)
         except Exception as e:
-            continue
+            save_log(f"Erro ao processar mensagem: {e}")
 
     return current_count
 
 def get_symbols():
-    select_query = "SELECT symbol FROM symbols"
+    select_query = f"SELECT symbol FROM symbols ORDER BY execution_counter, id"
     result = execute_query(select_query)
     return [row['symbol'] for row in result] if result else []
 
-def process_symbol(symbol):
-    sentiment_pipe = pipeline(
-        "sentiment-analysis",
-        model="StephanAkkerman/FinTwitBERT-sentiment",
-    )
+def process_symbol(symbol, pipe):
+    update_query = f"UPDATE symbols SET execution_counter = execution_counter + 1 WHERE symbol = '{symbol}'"
+    execute_query(update_query)
 
     with sync_playwright() as p:
+        SLEEP_TIME = 5
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
 
         page.goto('https://stocktwits.com/signin?next=/login')
-        time.sleep(3)
+        time.sleep(SLEEP_TIME)
 
-        page.fill("input[name='login']", os.getenv("STOCKWITS_USERNAME"))
-        page.fill("input[name='password']", os.getenv("STOCKWITS_PASSWORD"))
+        page.fill("input[name='login']", os.getenv("STOCKTWITS_USERNAME"))
+        page.fill("input[name='password']", os.getenv("STOCKTWITS_PASSWORD"))
+        time.sleep(SLEEP_TIME)
         page.press("input[name='password']", "Enter")
-        time.sleep(5)
+        time.sleep(SLEEP_TIME)
 
         page.goto(f'https://stocktwits.com/symbol/{symbol}')
-        time.sleep(3)
+        time.sleep(SLEEP_TIME)
 
-        SCROLL_PAUSE_TIME = 4
         last_height = page.evaluate("document.body.scrollHeight")
         total_messages = 0
 
         while True:
-            total_messages = scrap_message(page, symbol, total_messages, sentiment_pipe)
+            total_messages = scrap_message(page, symbol, total_messages, pipe)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(SCROLL_PAUSE_TIME)
+            time.sleep(SLEEP_TIME)
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
-                print(f"Symbol {symbol}: Não há mais conteúdo disponível para carregar.")
+                save_log(f"Symbol {symbol}: Não há mais conteúdo disponível para carregar.")
                 break
             last_height = new_height
 
@@ -126,20 +130,27 @@ def process_symbol(symbol):
 def main():
     symbols = get_symbols()
     if not symbols:
-        print("Nenhum símbolo encontrado na base de dados.")
+        save_log("Nenhum símbolo encontrado na base de dados.")
         sys.exit()
 
-    max_workers = os.getenv("MAX_WORKERS", 6)
+    max_workers = int(os.getenv("MAX_WORKERS", 5))
     symbol_iter = iter(symbols)
     future_to_symbol = {}
 
+    pipe = pipeline(
+        "sentiment-analysis",
+        model="StephanAkkerman/FinTwitBERT-sentiment",
+    )
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submete as 6 primeiras tarefas
+        # Submete as 5 primeiras tarefas
         for _ in range(max_workers):
             try:
                 symbol = next(symbol_iter)
-                future = executor.submit(process_symbol, symbol)
+                future = executor.submit(process_symbol, symbol, pipe)
                 future_to_symbol[future] = symbol
+                
+                save_log(f"Submetendo tarefa para o símbolo: {symbol}")
             except StopIteration:
                 break
 
@@ -152,17 +163,21 @@ def main():
                 symbol_concluido = future_to_symbol.pop(future)
                 try:
                     future.result()
-                    print(f"Symbol {symbol_concluido} concluído com sucesso.")
+                    save_log(f"Symbol {symbol_concluido} concluído com sucesso.")
                 except Exception as exc:
-                    print(f"Symbol {symbol_concluido} gerou uma exceção: {exc}")
+                    save_log(f"Symbol {symbol_concluido} gerou uma exceção: {exc}")
 
                 # Submete nova tarefa se houver symbol disponível
                 try:
                     next_symbol = next(symbol_iter)
-                    new_future = executor.submit(process_symbol, next_symbol)
+                    new_future = executor.submit(process_symbol, next_symbol, pipe)
                     future_to_symbol[new_future] = next_symbol
+
+                    save_log(f"Submetendo tarefa para o símbolo: {symbol}")
                 except StopIteration:
                     pass
+
+    save_log(f"Execução concluída às: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 if __name__ == "__main__":
