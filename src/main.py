@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+sys.path.insert(0, '/Users/admin-wana/Projects/finance-tweets-builder')
 import time
 import base64
 import requests
@@ -10,8 +11,15 @@ from dotenv import load_dotenv
 from config.database import execute_query
 from playwright.sync_api import sync_playwright
 from transformers import pipeline
+from PIL import Image, UnidentifiedImageError
+from io import BytesIO
 
 load_dotenv()
+
+OUTPUT_DIR = 'images'
+MAX_DIMENSION = 720  # px
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def save_log(log):
     execute_query("INSERT INTO execution_logs (log) VALUES (%s)", (log,))
@@ -30,6 +38,57 @@ def download_image(element):
     except Exception as e:
         save_log(f"Erro ao baixar imagem: {e}")
         return None
+    
+def process_and_save(img_data_b64, img_id):
+    if not img_data_b64:
+        return None
+    
+    try:
+        # 1) Decodifica Base64
+        img_data = base64.b64decode(img_data_b64)
+        img = Image.open(BytesIO(img_data))
+
+        # 2) Redimensiona mantendo aspect ratio
+        w, h = img.size
+        max_orig = max(w, h)
+        if max_orig > MAX_DIMENSION:
+            scale = MAX_DIMENSION / max_orig
+            new_size = (int(w * scale), int(h * scale))
+            img = img.resize(new_size, Image.LANCZOS)
+
+        # 3) Define formato e extensão
+        fmt = img.format or 'JPEG'
+        ext = fmt.lower()
+        # Se tiver alpha, força PNG
+        if img.mode in ("RGBA", "LA") or (fmt.upper() == 'PNG' and 'A' in img.getbands()):
+            fmt = 'PNG'
+            ext = 'png'
+        else:
+            fmt = 'JPEG'
+            ext = 'jpg'
+            if img.mode in ('RGBA', 'P'):
+                img = img.convert('RGB')
+
+        # 4) Caminho do ficheiro
+        filename = f"{img_id}.{ext}"
+        filepath = os.path.join(OUTPUT_DIR, filename)
+
+        # 5) Salva otimizado
+        if fmt == 'JPEG':
+            img.save(filepath, fmt, quality=85, optimize=True)
+        else:
+            img.save(filepath, fmt, optimize=True)
+
+        return filepath
+
+    except (base64.binascii.Error, UnidentifiedImageError) as e:
+        # Erro na decodificação ou leitura da imagem
+        print(f"[ERRO no process_and_save] id={img_id}: formato inválido ou corrupto ({e})")
+        return None
+    except Exception as e:
+        # Qualquer outro erro
+        print(f"[ERRO inesperado no process_and_save] id={img_id}: {e}")
+        return None
 
 def scrap_message(page, symbol, total_messages, pipe=None):
     messages = page.query_selector_all("xpath=.//div[contains(@class, 'StreamMessage_container__')]")
@@ -44,9 +103,9 @@ def scrap_message(page, symbol, total_messages, pipe=None):
             match = re.search(r"/message/(\d+)", href_value)
             if not match:
                 continue
-            message_id = match.group(1)
+            post_id = match.group(1)
 
-            select_query = f"select id from tweets where pub_id = {message_id} and symbol = '{symbol}'"
+            select_query = f"select id from stocktwits_posts where post_id = {post_id} and symbol = '{symbol}'"
             result = execute_query(select_query)
 
             time_element = message.query_selector("xpath=.//time")
@@ -63,6 +122,21 @@ def scrap_message(page, symbol, total_messages, pipe=None):
             text = text_element.text_content().strip() if text_element else ""
 
             image_base64 = download_image(message)
+            image_path = process_and_save(image_base64, post_id) if image_base64 else None
+
+            counters_span = message.query_selector_all("xpath=.//span[starts-with(@class, 'StreamMessageLabelCount_labelCount')]")
+
+            comments_span = counters_span[0] if counters_span and len(counters_span) > 0 else None
+            reshares_span = counters_span[1] if counters_span and len(counters_span) > 1 else None
+            likes_span = counters_span[2] if counters_span and len(counters_span) > 2 else None
+
+            comments_count = comments_span.text_content().strip() if comments_span else 0
+            reshares_count = reshares_span.text_content().strip() if reshares_span else 0
+            likes_count = likes_span.text_content().strip() if likes_span else 0
+
+            comments_count = int(comments_count) if comments_count.isdigit() else 0
+            reshares_count = int(reshares_count) if reshares_count and reshares_count.isdigit() else 0
+            likes_count = int(likes_count) if likes_count and likes_count.isdigit() else 0
 
             sentiment = None
 
@@ -76,8 +150,8 @@ def scrap_message(page, symbol, total_messages, pipe=None):
                 except Exception as e:
                     sentiment = None
 
-            insert_query = 'insert into tweets (pub_id, pub_author, pub_text, pub_img, pub_date, symbol, sentiment) values (%s, %s, %s, %s, %s, %s, %s)'
-            insert_data = (message_id, author, text, image_base64, date, symbol, sentiment)
+            insert_query = 'insert into stocktwits_posts (symbol, post_id, post_author, post_date, post_text, post_comments, post_reshares, post_likes, post_img_path, sentiment) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)'
+            insert_data = (symbol, post_id, author, date, text, comments_count, reshares_count, likes_count, image_path, sentiment)
 
             execute_query(insert_query, insert_data)
         except Exception as e:
