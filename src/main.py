@@ -18,6 +18,7 @@ load_dotenv()
 
 OUTPUT_DIR = 'images'
 MAX_DIMENSION = 720  # px
+pipe = None
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -164,9 +165,11 @@ def get_symbols():
     result = execute_query(select_query)
     return [row['symbol'] for row in result] if result else []
 
-def process_symbol(symbol, pipe):
+def process_symbol(symbol):
     update_query = f"UPDATE symbols SET execution_counter = execution_counter + 1 WHERE symbol = '{symbol}'"
     execute_query(update_query)
+
+    global pipe
 
     with sync_playwright() as p:
         SLEEP_TIME = 5
@@ -201,6 +204,14 @@ def process_symbol(symbol, pipe):
 
         browser.close()
 
+def init_worker():
+    global pipe
+    pipe = pipeline(
+       "sentiment-analysis",
+       model="StephanAkkerman/FinTwitBERT-sentiment",
+       device=-1,  # CPU
+    )
+
 def main():
     symbols = get_symbols()
     if not symbols:
@@ -216,12 +227,12 @@ def main():
         model="StephanAkkerman/FinTwitBERT-sentiment",
     )
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker) as executor:
         # Submete as 5 primeiras tarefas
         for _ in range(max_workers):
             try:
                 symbol = next(symbol_iter)
-                future = executor.submit(process_symbol, symbol, pipe)
+                future = executor.submit(process_symbol, symbol)
                 future_to_symbol[future] = symbol
                 
                 save_log(f"Submetendo tarefa para o símbolo: {symbol}", print_log=True)
@@ -244,7 +255,7 @@ def main():
                 # Submete nova tarefa se houver symbol disponível
                 try:
                     next_symbol = next(symbol_iter)
-                    new_future = executor.submit(process_symbol, next_symbol, pipe)
+                    new_future = executor.submit(process_symbol, next_symbol)
                     future_to_symbol[new_future] = next_symbol
 
                     save_log(f"Submetendo tarefa para o símbolo: {symbol}", print_log=True)
