@@ -21,9 +21,9 @@ MAX_DIMENSION = 720  # px
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def save_log(log):
+def save_log(log, print_log=False):
     execute_query("INSERT INTO execution_logs (log) VALUES (%s)", (log,))
-    print(log)
+    if print_log: print(log)
 
 def download_image(element):
     try:
@@ -195,7 +195,7 @@ def process_symbol(symbol, pipe):
             time.sleep(SLEEP_TIME)
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
-                save_log(f"Symbol {symbol}: Não há mais conteúdo disponível para carregar.")
+                save_log(f"Symbol {symbol}: Não há mais conteúdo disponível para carregar.", print_log=True)
                 break
             last_height = new_height
 
@@ -204,7 +204,7 @@ def process_symbol(symbol, pipe):
 def main():
     symbols = get_symbols()
     if not symbols:
-        save_log("Nenhum símbolo encontrado na base de dados.")
+        save_log("Nenhum símbolo encontrado na base de dados.", print_log=True)
         sys.exit()
 
     max_workers = int(os.getenv("MAX_WORKERS", 5))
@@ -216,7 +216,7 @@ def main():
         model="StephanAkkerman/FinTwitBERT-sentiment",
     )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submete as 5 primeiras tarefas
         for _ in range(max_workers):
             try:
@@ -224,7 +224,7 @@ def main():
                 future = executor.submit(process_symbol, symbol, pipe)
                 future_to_symbol[future] = symbol
                 
-                save_log(f"Submetendo tarefa para o símbolo: {symbol}")
+                save_log(f"Submetendo tarefa para o símbolo: {symbol}", print_log=True)
             except StopIteration:
                 break
 
@@ -237,9 +237,9 @@ def main():
                 symbol_concluido = future_to_symbol.pop(future)
                 try:
                     future.result()
-                    save_log(f"Symbol {symbol_concluido} concluído com sucesso.")
+                    save_log(f"Symbol {symbol_concluido} concluído com sucesso.", print_log=True)
                 except Exception as exc:
-                    save_log(f"Symbol {symbol_concluido} gerou uma exceção: {exc}")
+                    save_log(f"Symbol {symbol_concluido} gerou uma exceção: {exc}", print_log=True)
 
                 # Submete nova tarefa se houver symbol disponível
                 try:
@@ -247,11 +247,11 @@ def main():
                     new_future = executor.submit(process_symbol, next_symbol, pipe)
                     future_to_symbol[new_future] = next_symbol
 
-                    save_log(f"Submetendo tarefa para o símbolo: {symbol}")
+                    save_log(f"Submetendo tarefa para o símbolo: {symbol}", print_log=True)
                 except StopIteration:
                     pass
 
-    save_log(f"Execução concluída às: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    save_log(f"Execução concluída às: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", print_log=True)
 
 
 if __name__ == "__main__":

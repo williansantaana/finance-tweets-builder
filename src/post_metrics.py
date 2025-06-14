@@ -10,12 +10,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from config.database import execute_query
 from playwright.sync_api import sync_playwright
+import numpy as np
 
 load_dotenv()
 
-def get_posts(start_id, end_id):
-    query = "SELECT * FROM stocktwits_posts WHERE id BETWEEN %s AND %s AND post_likes IS NULL ORDER BY id LIMIT 1000"
-    result = execute_query(query, (start_id, end_id))
+def get_posts():
+    query = "SELECT * FROM stocktwits_posts WHERE post_likes IS NULL ORDER BY id"
+    result = execute_query(query)
     return result if result else []
 
 def update_post_metrics(id, comments, reshares, likes):
@@ -38,7 +39,7 @@ def partition_ranges(db_size, parts=10):
         start = end + 1
     return ranges
 
-def process_post_metrics(range):
+def process_post_metrics(posts):
     SLEEP_TIME = 4
     N_RESTART = 100  # Reinicia navegador a cada 100 posts
     count = 0
@@ -60,66 +61,64 @@ def process_post_metrics(range):
 
     playwright, browser, context, page = start_browser()
 
-    while True:
-        posts = get_posts(range[0], range[1])
-        if not posts:
-            print("No more posts to process.")
-            break
+    if not posts:
+        print("No more posts to process.")
+        return
 
-        for post in posts:
-            try:
-                post_id = post['post_id']
-                author = post['post_author']
-                print(f"Processing post ID: {post_id} by {author}")
+    for post in posts:
+        try:
+            post_id = post['post_id']
+            author = post['post_author']
+            print(f"Processing post ID: {post_id} by {author}")
 
-                page.goto(f'https://stocktwits.com/{author}/message/{post_id}')
-                time.sleep(3)
+            page.goto(f'https://stocktwits.com/{author}/message/{post_id}')
+            time.sleep(3)
 
-                message_element = page.query_selector(f"xpath=.//div[@data-testid='message-{post_id}']")
-                if not message_element:
-                    update_post_metrics(post['id'], 0, 0, 0)
-                    continue
-
-                counters_span = message_element.query_selector_all("xpath=.//span[starts-with(@class, 'StreamMessageLabelCount_labelCount')]")
-
-                def parse_count(txt):
-                    if not txt:
-                        return 0
-                    txt = txt.lower().replace(',', '')
-                    if 'k' in txt:
-                        return int(float(txt.replace('k','')) * 1000)
-                    if txt.isdigit():
-                        return int(txt)
-                    return 0
-
-                if counters_span:
-                    comments_span = counters_span[0]
-                    reshares_span = counters_span[1] if len(counters_span) > 1 else None
-                    likes_span = counters_span[2] if len(counters_span) > 2 else None
-
-                    comments_count = parse_count(comments_span.text_content().strip()) if comments_span else 0
-                    reshares_count = parse_count(reshares_span.text_content().strip()) if reshares_span else 0
-                    likes_count = parse_count(likes_span.text_content().strip()) if likes_span else 0
-
-                    update_post_metrics(
-                        post['id'],
-                        comments_count,
-                        reshares_count,
-                        likes_count
-                    )
-                else:
-                    update_post_metrics(post['id'], 0, 0, 0)
-            except Exception as _:
+            message_element = page.query_selector(f"xpath=.//div[@data-testid='message-{post_id}']")
+            if not message_element:
                 update_post_metrics(post['id'], 0, 0, 0)
-            count += 1
-            # Reinicia navegador a cada N posts para evitar leaks
-            if count % N_RESTART == 0:
-                page.close()
-                context.close()
-                browser.close()
-                playwright.stop()
-                time.sleep(3)  # Dá um tempinho para o SO liberar recursos
-                playwright, browser, context, page = start_browser()
+                continue
+
+            counters_span = message_element.query_selector_all("xpath=.//span[starts-with(@class, 'StreamMessageLabelCount_labelCount')]")
+
+            def parse_count(txt):
+                if not txt:
+                    return 0
+                txt = txt.lower().replace(',', '')
+                if 'k' in txt:
+                    return int(float(txt.replace('k','')) * 1000)
+                if txt.isdigit():
+                    return int(txt)
+                return 0
+
+            if counters_span:
+                comments_span = counters_span[0]
+                reshares_span = counters_span[1] if len(counters_span) > 1 else None
+                likes_span = counters_span[2] if len(counters_span) > 2 else None
+
+                comments_count = parse_count(comments_span.text_content().strip()) if comments_span else 0
+                reshares_count = parse_count(reshares_span.text_content().strip()) if reshares_span else 0
+                likes_count = parse_count(likes_span.text_content().strip()) if likes_span else 0
+
+                update_post_metrics(
+                    post['id'],
+                    comments_count,
+                    reshares_count,
+                    likes_count
+                )
+            else:
+                update_post_metrics(post['id'], 0, 0, 0)
+        except Exception as _:
+            update_post_metrics(post['id'], 0, 0, 0)
+        count += 1
+        # Reinicia navegador a cada N posts para evitar leaks
+        if count % N_RESTART == 0:
+            page.close()
+            context.close()
+            browser.close()
+            playwright.stop()
+            time.sleep(3)  # Dá um tempinho para o SO liberar recursos
+            playwright, browser, context, page = start_browser()
 
     page.close()
     context.close()
@@ -133,16 +132,12 @@ def get_db_size():
     return db_size_result[0]['count'] if db_size_result else 0
 
 def main():
-    DB_SIZE = 838221
+    MAX_WORKERS = 10
+    posts = get_posts()
+    posts_set = [arr.tolist() for arr in np.array_split(posts, MAX_WORKERS)]
 
-    if DB_SIZE == 0:
-        print("No posts to process.")
-        return
-
-    ranges = partition_ranges(DB_SIZE, parts=10)
-
-    with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
-        future_to_range = {executor.submit(process_post_metrics, r): r for r in ranges}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_range = {executor.submit(process_post_metrics, p): p for p in posts_set}
         while future_to_range:
             done, _ = concurrent.futures.wait(future_to_range, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in done:
