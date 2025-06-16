@@ -84,11 +84,11 @@ def process_and_save(img_data_b64, img_id):
 
     except (base64.binascii.Error, UnidentifiedImageError) as e:
         # Erro na decodificação ou leitura da imagem
-        print(f"[ERRO no process_and_save] id={img_id}: formato inválido ou corrupto ({e})")
+        save_log(f"[ERRO no process_and_save] id={img_id}: formato inválido ou corrupto ({e})")
         return None
     except Exception as e:
         # Qualquer outro erro
-        print(f"[ERRO inesperado no process_and_save] id={img_id}: {e}")
+        save_log(f"[ERRO inesperado no process_and_save] id={img_id}: {e}")
         return None
 
 def scrap_message(page, symbol, total_messages, pipe=None):
