@@ -5,10 +5,11 @@ sys.path.insert(0, '/Users/admin-wana/Projects/finance-tweets-builder')
 import time
 import concurrent.futures
 import logging
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from config.database import execute_query
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 # Configure logging
 logging.basicConfig(
@@ -36,9 +37,9 @@ UPDATE_AUTHOR_SQL = (
 
 ENGAGEMENT_SQL = (
     "SELECT "
-    "AVG(sp.post_likes) AS avg_post_likes, "
-    "AVG(sp.post_reshares) AS avg_post_reshares, "
-    "AVG(sp.post_comments) AS avg_post_comments "
+    "    AVG(sp.post_likes) AS avg_post_likes, "
+    "    AVG(sp.post_reshares) AS avg_post_reshares, "
+    "    AVG(sp.post_comments) AS avg_post_comments "
     "FROM stocktwits_posts sp "
     "WHERE sp.post_author = %s"
 )
@@ -96,44 +97,54 @@ def update_author_record(author_id, following, followers, likes, reshares, comme
     execute_query(UPDATE_AUTHOR_SQL, params)
 
 
-def scrape_author_stats(page, author: str) -> tuple:
+async def scrape_author_stats(page, author: str) -> tuple:
     """Navigate to author's page and extract following/follower counts."""
-    page.goto(f'https://stocktwits.com/{author}', timeout=30_000)
-    time.sleep(SLEEP_TIME)
+    await page.goto(f'https://stocktwits.com/{author}', timeout=30_000)
+    await asyncio.sleep(SLEEP_TIME)
     follow_sel = f"xpath=.//a[contains(@href, '/{author}/following')]//strong"
     follower_sel = f"xpath=.//a[contains(@href, '/{author}/followers')]//strong"
 
+    following = 0
+    followers = 0
     try:
-        following = parse_count(page.query_selector(follow_sel).text_content())
+        el = await page.query_selector(follow_sel)
+        txt = await el.text_content() if el else ''
+        following = parse_count(txt)
     except Exception:
-        following = 0
+        pass
     try:
-        followers = parse_count(page.query_selector(follower_sel).text_content())
+        el = await page.query_selector(follower_sel)
+        txt = await el.text_content() if el else ''
+        followers = parse_count(txt)
     except Exception:
-        followers = 0
+        pass
 
     return following, followers
 
 
 def process_authors_subset(authors_subset: list):
-    """Process a chunk of authors in a fresh browser instance."""
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
+    """Entry point for executor: runs async scraping."""
+    asyncio.run(_run_async_subset(authors_subset))
 
-        # Login once per browser
-        page.goto('https://stocktwits.com/signin?next=/login')
-        time.sleep(SLEEP_TIME)
-        page.fill("input[name='login']", os.getenv('STOCKTWITS_USERNAME', ''))
-        page.fill("input[name='password']", os.getenv('STOCKTWITS_PASSWORD', ''))
-        page.press("input[name='password']", "Enter")
-        time.sleep(SLEEP_TIME)
+
+async def _run_async_subset(authors_subset: list):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        # Login
+        await page.goto('https://stocktwits.com/signin?next=/login')
+        await asyncio.sleep(SLEEP_TIME)
+        await page.fill("input[name='login']", os.getenv('STOCKTWITS_USERNAME', ''))
+        await page.fill("input[name='password']", os.getenv('STOCKTWITS_PASSWORD', ''))
+        await page.press("input[name='password']", "Enter")
+        await asyncio.sleep(SLEEP_TIME)
 
         for idx, record in enumerate(authors_subset, start=1):
             author_id, author = record['id'], record['author']
             try:
-                following, followers = scrape_author_stats(page, author)
+                following, followers = await scrape_author_stats(page, author)
                 likes, reshares, comments = get_engagement(author)
                 update_author_record(author_id, following, followers, likes, reshares, comments)
                 logging.info(f"Processed {author} | followers: {followers}, following: {following}")
@@ -141,16 +152,15 @@ def process_authors_subset(authors_subset: list):
                 save_log(f"Error processing {author}: {exc}")
 
             if idx % RESTART_INTERVAL == 0:
-                # periodic browser restart to free resources
-                page.close()
-                context.close()
-                browser.close()
-                time.sleep(2)
-                return process_authors_subset(authors_subset[idx:])
+                await context.close()
+                await browser.close()
+                await asyncio.sleep(2)
+                # Restart on remaining subset
+                await _run_async_subset(authors_subset[idx:])
+                return
 
-        page.close()
-        context.close()
-        browser.close()
+        await context.close()
+        await browser.close()
 
 
 def chunkify(lst, n):
