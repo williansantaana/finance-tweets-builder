@@ -222,11 +222,6 @@ def main():
     symbol_iter = iter(symbols)
     future_to_symbol = {}
 
-    pipe = pipeline(
-        "sentiment-analysis",
-        model="StephanAkkerman/FinTwitBERT-sentiment",
-    )
-
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker) as executor:
         # Submete as 5 primeiras tarefas
         for _ in range(max_workers):

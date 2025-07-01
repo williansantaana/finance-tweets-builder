@@ -176,4 +176,7 @@ cython_debug/
 .idea
 # Ignore Visual Studio Code workspace settings folder
 .vscode
+
+# Other folders to ignore
 images/
+docs/
